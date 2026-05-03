@@ -5,19 +5,18 @@ import json
 import os
 import matplotlib.pyplot as plt
 
-# 🔑 токен берётся из Railway (Environment Variables)
 TOKEN = os.getenv("TOKEN")
 
 FILE = "journal.json"
 ARCHIVE = "archive.json"
 
-# 📅 неделя (год + месяц + неделя месяца)
+# 📅 неделя: год / месяц / неделя месяца
 def current_week():
     now = datetime.now()
     week = (now.day - 1) // 7 + 1
-    return now.strftime(f"%Y %B W{week}")
+    return f"{now.year} {now.strftime('%B')} W{week}"
 
-# 💾 работа с файлами
+# 💾 файлы
 def load(file):
     if os.path.exists(file):
         with open(file, "r") as f:
@@ -51,12 +50,12 @@ def check_week():
 
         week_id = now
 
-# 📱 кнопки
+# 📱 меню
 menu = ReplyKeyboardMarkup(
     [
         ["📊 Calc", "📅 Week"],
         ["📌 Close trade", "📊 Stats"],
-        ["📂 Archive", "📈 Equity"],
+        ["📈 Equity", "📂 Archive"],
         ["🧹 Reset"]
     ],
     resize_keyboard=True
@@ -67,15 +66,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     check_week()
 
     await update.message.reply_text(
-        f"""🤖 Trading Bot
+f"""🤖 TRADING ANALYTICS BOT
 
-📅 {week_id}
+📅 Week: {week_id}
+📊 Trades tracking: ACTIVE
 
-Выбери действие:""",
+━━━━━━━━━━━━━━━
+📌 Choose action below
+""",
         reply_markup=menu
     )
 
-# 🧠 основной обработчик
+# 🧠 обработчик
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global weekly_log
 
@@ -87,15 +89,15 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 📊 calc
     if text == "📊 Calc":
         context.user_data["step"] = "deposit"
-        await update.message.reply_text("💰 депозит:")
+        await update.message.reply_text("💰 Enter deposit:")
         return
 
-    # 📅 week
+    # 📅 week report
     if text == "📅 Week":
-        closed = [t for t in weekly_log if t.get("end_deposit") is not None]
+        closed = [t for t in weekly_log if t.get("end_deposit")]
 
         if not weekly_log:
-            await update.message.reply_text("нет сделок")
+            await update.message.reply_text("No trades yet.")
             return
 
         wins = 0
@@ -114,32 +116,34 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 losses += 1
 
         total = len(closed)
-        winrate = (wins / total * 100) if total > 0 else 0
+        winrate = (wins / total * 100) if total else 0
 
         await update.message.reply_text(
-f"""📊 НЕДЕЛЯ {week_id}
+f"""📊 WEEK REPORT {week_id}
 
-📈 сделок: {len(weekly_log)}
-✅ закрытых: {total}
+━━━━━━━━━━━━━━━
+📈 Trades: {len(weekly_log)}
+✅ Closed: {total}
 
-🏆 winrate: {winrate:.1f}%
-🟢 wins: {wins}
-🔴 losses: {losses}
+🏆 Winrate: {winrate:.1f}%
+🟢 Wins: {wins}
+🔴 Losses: {losses}
 
-💰 риск: {risk_sum:.2f}$
-📊 PnL: {pnl:.2f}$
+💰 Risk used: {risk_sum:.2f}$
+📊 Net PnL: {pnl:.2f}$
 
-🧠 {"🔥 сильная неделя" if winrate > 55 else "⚠️ слабая"}
+━━━━━━━━━━━━━━━
+🧠 Status: {"🔥 STRONG WEEK" if winrate > 55 else "⚠️ WEAK WEEK"}
 """
         )
         return
 
     # 📊 stats
     if text == "📊 Stats":
-        closed = [t for t in weekly_log if t.get("end_deposit") is not None]
+        closed = [t for t in weekly_log if t.get("end_deposit")]
 
         if not closed:
-            await update.message.reply_text("нет данных")
+            await update.message.reply_text("No closed trades.")
             return
 
         wins = 0
@@ -158,34 +162,33 @@ f"""📊 НЕДЕЛЯ {week_id}
                 loss += abs(pnl)
 
         winrate = (wins / len(closed)) * 100
-
-        profit_factor = profit / loss if loss != 0 else float("inf")
-
+        pf = profit / loss if loss != 0 else float("inf")
         expectancy = (profit - loss) / len(closed)
 
         await update.message.reply_text(
 f"""📊 STATISTICS
 
-🏆 winrate: {winrate:.1f}%
-📈 profit factor: {profit_factor:.2f}
-💰 expectancy: {expectancy:.2f}$
+━━━━━━━━━━━━━━━
+🏆 Winrate: {winrate:.1f}%
+📈 Profit Factor: {pf:.2f}
+💰 Expectancy: {expectancy:.2f}$
 
-🟢 wins: {wins}
-🔴 losses: {losses}
+🟢 Wins: {wins}
+🔴 Losses: {losses}
+━━━━━━━━━━━━━━━
 """
         )
         return
 
-    # 📈 equity graph
+    # 📈 equity
     if text == "📈 Equity":
-        closed = [t for t in weekly_log if t.get("end_deposit") is not None]
+        closed = [t for t in weekly_log if t.get("end_deposit")]
 
         if not closed:
-            await update.message.reply_text("нет данных")
+            await update.message.reply_text("No data yet.")
             return
 
-        x = []
-        y = []
+        x, y = [], []
 
         for i, t in enumerate(closed):
             x.append(i)
@@ -193,7 +196,7 @@ f"""📊 STATISTICS
 
         plt.figure()
         plt.plot(x, y, marker="o")
-        plt.title(f"Equity - {week_id}")
+        plt.title(f"Equity Curve - {week_id}")
         plt.grid()
 
         path = "equity.png"
@@ -207,20 +210,20 @@ f"""📊 STATISTICS
     if text == "🧹 Reset":
         weekly_log = []
         save(FILE, weekly_log)
-        await update.message.reply_text("очищено")
+        await update.message.reply_text("Data cleared.")
         return
 
     # 📌 close trade
     if text == "📌 Close trade":
         context.user_data["step"] = "close_id"
-        await update.message.reply_text("номер сделки:")
+        await update.message.reply_text("Enter trade ID:")
         return
 
     # 💰 deposit
     if step == "deposit":
         context.user_data["deposit"] = float(text)
         context.user_data["step"] = "risk"
-        await update.message.reply_text("риск %:")
+        await update.message.reply_text("Enter risk %:")
         return
 
     # 📊 create trade
@@ -240,14 +243,16 @@ f"""📊 STATISTICS
 
         context.user_data["step"] = None
 
-        await update.message.reply_text(f"сделка #{trade['id']} создана")
+        await update.message.reply_text(
+f"📌 Trade #{trade['id']} created\n💰 Risk: {trade['risk_amount']:.2f}$"
+        )
         return
 
     # 🔢 close trade id
     if step == "close_id":
         context.user_data["close_id"] = int(text)
         context.user_data["step"] = "close_result"
-        await update.message.reply_text("PnL в $:")
+        await update.message.reply_text("Enter PnL ($):")
         return
 
     # 💰 close result
@@ -263,7 +268,7 @@ f"""📊 STATISTICS
         save(FILE, weekly_log)
         context.user_data["step"] = None
 
-        await update.message.reply_text("сделка закрыта")
+        await update.message.reply_text("Trade closed ✔")
         return
 
 
