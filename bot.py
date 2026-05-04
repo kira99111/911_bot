@@ -1,318 +1,305 @@
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 from datetime import datetime
-import os
 import json
+import os
 
 TOKEN = os.getenv("TOKEN")
-FILE = "data.json"
 
+FILE_WEEK = "week.json"
+FILE_ARCHIVE = "archive.json"
+FILE_MONTH = "month.json"
 
-# ===== STORAGE =====
-def load():
-    if os.path.exists(FILE):
-        with open(FILE, "r") as f:
-            return json.load(f)
+# =========================
+# TIME
+# =========================
+
+def now_date():
+    dt = datetime.now()
+    week = (dt.day - 1) // 7 + 1
     return {
-        "start_deposit": None,
-        "balance": None,
-        "trades": [],
-        "archive": [],
-        "week": ""
+        "year": dt.year,
+        "month": dt.month,
+        "day": dt.day,
+        "week": week,
+        "label": f"{dt.year}-{dt.month:02d}-W{week}"
     }
 
+# =========================
+# STORAGE
+# =========================
 
-def save(data):
-    with open(FILE, "w") as f:
+def load(file):
+    if os.path.exists(file):
+        with open(file, "r") as f:
+            return json.load(f)
+    return []
+
+def save(file, data):
+    with open(file, "w") as f:
         json.dump(data, f, indent=2)
 
+week_log = load(FILE_WEEK)
+archive = load(FILE_ARCHIVE)
+month_log = load(FILE_MONTH)
 
-data = load()
+state = {}
 
+deposit = {"value": None}
 
-# ===== DATE =====
-def now_str():
-    now = datetime.now()
-    week = (now.day - 1) // 7 + 1
-    return now.strftime(f"%Y %B W{week} %d %H:%M")
+# =========================
+# BUTTONS
+# =========================
 
+menu = ReplyKeyboardMarkup(
+    [
+        ["💰 Депозит", "➕ Сделка"],
+        ["📌 Закрыть", "📊 Статистика"],
+        ["📂 Архив", "🧹 Неделя"],
+        ["↩️ Отмена"]
+    ],
+    resize_keyboard=True
+)
 
-def current_week():
-    now = datetime.now()
-    week = (now.day - 1) // 7 + 1
-    return now.strftime(f"%Y-%m-W{week}")
+# =========================
+# HELPERS
+# =========================
 
+def count_open():
+    return len([t for t in week_log if t["status"] == "open"])
 
-# ===== WEEK CHECK =====
-def check_week():
-    global data
+def next_trade_id():
+    return len(week_log) + 1
 
-    w = current_week()
+def calc_leverage(risk_pct):
+    if risk_pct <= 3:
+        return 10
+    elif risk_pct <= 5:
+        return 12
+    elif risk_pct <= 7:
+        return 15
+    return 15
 
-    if not data["week"]:
-        data["week"] = w
+def calc_position(deposit_value, risk_pct):
+    risk_money = deposit_value * risk_pct / 100
 
-    if data["week"] != w:
-        data["archive"].append({
-            "week": data["week"],
-            "trades": data["trades"],
-            "final_balance": data["balance"]
-        })
-        data["trades"] = []
-        data["start_deposit"] = None
-        data["balance"] = None
-        data["week"] = w
+    # ограничение 30%
+    max_allowed = deposit_value * 0.30
+    position = min(risk_money * 10, max_allowed)
 
-    save(data)
+    return risk_money, position
 
+# =========================
+# START
+# =========================
 
-# ===== MENU =====
-def get_menu():
-    has_open = any(t["result"] is None for t in data["trades"])
-
-    buttons = [
-        ["💰 Депозит", "📊 Сделка"],
-        ["📈 Статистика"]
-    ]
-
-    if has_open:
-        buttons.insert(1, ["📌 Закрыть"])
-
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
-
-
-# ===== START =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    check_week()
+    d = now_date()
+
     await update.message.reply_text(
-        f"🤖 Trading Bot\n\n📅 {now_str()}",
-        reply_markup=get_menu()
+        f"""🤖 Trading Bot
+
+📅 {d['year']}-M{d['month']}-W{d['week']}
+
+💰 Депозит: {deposit['value'] if deposit['value'] else 'не задан'}
+
+📌 Открытых сделок: {count_open()}
+""",
+        reply_markup=menu
     )
 
+# =========================
+# MAIN HANDLER
+# =========================
 
-# ===== HANDLER =====
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global data
-
-    check_week()
+    global week_log, archive, month_log, deposit
 
     text = update.message.text
-    step = context.user_data.get("step")
 
-    # ===== ДЕПОЗИТ =====
+    # =================
+    # DEPOSIT
+    # =================
     if text == "💰 Депозит":
-        if data["balance"]:
-            await update.message.reply_text(f"Депозит уже задан: {data['balance']}$")
-            return
-
-        context.user_data["step"] = "deposit"
+        state["step"] = "deposit"
         await update.message.reply_text("Введи депозит:")
         return
 
-    if step == "deposit":
-        value = float(text)
-        data["start_deposit"] = value
-        data["balance"] = value
+    if state.get("step") == "deposit":
+        deposit["value"] = float(text)
+        state["step"] = None
 
-        save(data)
-        context.user_data.clear()
-
-        await update.message.reply_text(f"💰 Баланс: {data['balance']}$")
+        await update.message.reply_text(
+            f"💰 Депозит установлен: {deposit['value']}$"
+        )
         return
 
-    # ===== СОЗДАНИЕ СДЕЛКИ =====
-    if text == "📊 Сделка":
-        if not data["balance"]:
+    # =================
+    # NEW TRADE
+    # =================
+    if text == "➕ Сделка":
+        if not deposit["value"]:
             await update.message.reply_text("Сначала задай депозит")
             return
 
-        context.user_data["step"] = "risk"
-        await update.message.reply_text("Риск %:")
+        state["step"] = "risk"
+        await update.message.reply_text("📊 Риск %:")
         return
 
-    if step == "risk":
-        context.user_data["risk"] = float(text)
-        context.user_data["step"] = "rr"
-        await update.message.reply_text("RR:")
+    # risk
+    if state.get("step") == "risk":
+        state["risk"] = float(text)
+        state["step"] = "pair"
+        await update.message.reply_text("📌 Тикер:")
         return
 
-    if step == "rr":
-        context.user_data["rr"] = float(text)
-        context.user_data["step"] = "ticker"
-        await update.message.reply_text("Тикер:")
-        return
+    # pair
+    if state.get("step") == "pair":
+        state["pair"] = text
 
-    if step == "ticker":
-        context.user_data["ticker"] = text.upper()
-        context.user_data["step"] = "calc_position"
-        await update.message.reply_text("Рассчитать позицию? (да/нет)")
-        return
-
-    # ===== OPTIONAL POSITION =====
-    if step == "calc_position":
-        if text.lower() == "да":
-            context.user_data["step"] = "entry"
-            await update.message.reply_text("Вход:")
-            return
-        else:
-            context.user_data["step"] = "create_trade"
-            text = None
-
-    if step == "entry":
-        context.user_data["entry"] = float(text)
-        context.user_data["step"] = "sl"
-        await update.message.reply_text("Стоп:")
-        return
-
-    if step == "sl":
-        context.user_data["sl"] = float(text)
-        context.user_data["step"] = "tp"
-        await update.message.reply_text("Тейк:")
-        return
-
-    if step == "tp":
-        context.user_data["tp"] = float(text)
-        context.user_data["step"] = "create_trade"
-
-    # ===== CREATE TRADE =====
-    if step == "create_trade":
-        deposit = data["balance"]
-        risk = context.user_data["risk"]
-        rr = context.user_data["rr"]
-        ticker = context.user_data["ticker"]
-
-        risk_amount = deposit * risk / 100
-        profit_plan = risk_amount * rr
-
-        position_info = ""
-
-        if "entry" in context.user_data:
-            entry = context.user_data["entry"]
-            sl = context.user_data["sl"]
-
-            distance = abs(entry - sl)
-            size = risk_amount / distance if distance else 0
-            position_value = size * entry
-
-            leverage = position_value / deposit if deposit else 0
-
-            if position_value > deposit * 0.3:
-                position_value = deposit * 0.3
-
-            if leverage > 15:
-                leverage = 15
-
-            position_info = (
-                f"💼 участие: {position_value:.2f}$\n"
-                f"⚙️ плечо: {leverage:.2f}x\n\n"
-            )
+        risk_money, position = calc_position(deposit["value"], state["risk"])
+        lev = calc_leverage(state["risk"])
 
         trade = {
-            "ticker": ticker,
-            "risk_amount": risk_amount,
-            "profit_plan": profit_plan,
-            "start_time": now_str(),
-            "result": None
+            "id": next_trade_id(),
+            "pair": state["pair"],
+            "risk_pct": state["risk"],
+            "risk_money": risk_money,
+            "position": position,
+            "leverage": lev,
+            "start_deposit": deposit["value"],
+            "result": None,
+            "status": "open",
+            "time_open": str(datetime.now())
         }
 
-        data["trades"].append(trade)
-        save(data)
+        week_log.append(trade)
+        save(FILE_WEEK, week_log)
 
-        open_trades = len([t for t in data["trades"] if t["result"] is None])
+        state.clear()
 
-        msg = (
-            f"📊 {ticker}\n\n"
-            f"💰 баланс: {deposit:.2f}$\n"
-            f"{position_info}"
-            f"📈 +{profit_plan:.2f}$\n"
-            f"📉 -{risk_amount:.2f}$\n\n"
-            f"📌 открытых: {open_trades}\n"
-            f"⏳ сделка в процессе"
+        await update.message.reply_text(
+f"""📊 СДЕЛКА #{trade['id']}
+
+📌 {trade['pair']}
+💰 депозит: {deposit['value']:.2f}$
+⚠️ риск: {trade['risk_pct']:.2f}%
+💸 риск $: {risk_money:.2f}
+📦 сумма: {position:.2f}$
+📊 плечо: x{lev}
+
+📌 открытых сделок: {count_open()}
+"""
         )
-
-        context.user_data.clear()
-        await update.message.reply_text(msg)
         return
 
-    # ===== ЗАКРЫТИЕ =====
+    # =================
+    # CLOSE TRADE
+    # =================
     if text == "📌 Закрыть":
-        open_trades = [t for t in data["trades"] if t["result"] is None]
+        open_trades = [t for t in week_log if t["status"] == "open"]
 
         if not open_trades:
             await update.message.reply_text("Нет открытых сделок")
             return
 
-        keyboard = [[t["ticker"]] for t in open_trades]
+        state["step"] = "close_id"
 
-        context.user_data["step"] = "close_select"
-
-        await update.message.reply_text(
-            "Выбери сделку:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        return
-
-    if step == "close_select":
-        context.user_data["close_ticker"] = text
-        context.user_data["step"] = "close_result"
-        await update.message.reply_text("PnL ($):")
-        return
-
-    if step == "close_result":
-        ticker = context.user_data["close_ticker"]
-        pnl = float(text)
-
-        for t in data["trades"]:
-            if t["ticker"] == ticker and t["result"] is None:
-                t["result"] = pnl
-                t["end_time"] = now_str()
-
-                data["balance"] += pnl
-
-                r = pnl / t["risk_amount"] if t["risk_amount"] else 0
-
-                await update.message.reply_text(
-                    f"📌 {ticker}\n\n"
-                    f"💰 {pnl:.2f}$\n"
-                    f"📊 {r:.2f}R\n\n"
-                    f"💼 баланс: {data['balance']:.2f}$"
-                )
-                break
-
-        save(data)
-        context.user_data.clear()
-        return
-
-    # ===== СТАТИСТИКА =====
-    if text == "📈 Статистика":
-        closed = [t for t in data["trades"] if t["result"] is not None]
-
-        if not closed:
-            await update.message.reply_text("Нет данных")
-            return
-
-        wins = [t for t in closed if t["result"] > 0]
-        losses = [t for t in closed if t["result"] <= 0]
-
-        winrate = len(wins) / len(closed) * 100
-
-        msg = (
-            f"📊 Неделя\n\n"
-            f"💰 старт: {data['start_deposit']}$\n"
-            f"💼 текущий: {data['balance']:.2f}$\n\n"
-            f"🏆 winrate: {winrate:.1f}%\n"
-            f"🟢 {len(wins)} / 🔴 {len(losses)}\n\n"
-        )
-
-        for t in closed:
-            r = t["result"] / t["risk_amount"] if t["risk_amount"] else 0
-            msg += f"{t['ticker']} → {r:.2f}R\n"
+        msg = "Выбери номер сделки:\n\n"
+        for t in open_trades:
+            msg += f"#{t['id']} {t['pair']} | депозит {t['start_deposit']}$\n"
 
         await update.message.reply_text(msg)
         return
 
+    if state.get("step") == "close_id":
+        trade_id = int(text)
 
-# ===== RUN =====
+        state["close_id"] = trade_id
+        state["step"] = "close_pnl"
+
+        await update.message.reply_text("💰 PnL ($):")
+        return
+
+    if state.get("step") == "close_pnl":
+        pnl = float(text)
+
+        for t in week_log:
+            if t["id"] == state["close_id"]:
+                t["result"] = pnl
+                t["status"] = "closed"
+                break
+
+        deposit["value"] += pnl
+
+        save(FILE_WEEK, week_log)
+
+        state.clear()
+
+        await update.message.reply_text(
+f"""📌 Trade #{t['id']}
+
+💰 PnL: {pnl:.2f}$
+📊 R: {pnl / t['risk_money']:.2f}R
+💰 депозит: {deposit['value']:.2f}$
+"""
+        )
+        return
+
+    # =================
+    # STATS
+    # =================
+    if text == "📊 Статистика":
+        closed = [t for t in week_log if t["status"] == "closed"]
+
+        wins = len([t for t in closed if t["result"] > 0])
+        losses = len([t for t in closed if t["result"] <= 0])
+
+        pnl = sum(t["result"] for t in closed)
+
+        winrate = (wins / len(closed) * 100) if closed else 0
+
+        await update.message.reply_text(
+f"""📊 СТАТИСТИКА
+
+📈 сделок: {len(week_log)}
+📌 закрытых: {len(closed)}
+
+🏆 winrate: {winrate:.1f}%
+💰 PnL: {pnl:.2f}$
+
+🟢 wins: {wins}
+🔴 losses: {losses}
+"""
+        )
+        return
+
+    # =================
+    # RESET WEEK
+    # =================
+    if text == "🧹 Неделя":
+        archive.append(week_log)
+        save(FILE_ARCHIVE, archive)
+
+        week_log = []
+        save(FILE_WEEK, week_log)
+
+        await update.message.reply_text("Неделя очищена")
+        return
+
+    # =================
+    # CANCEL
+    # =================
+    if text == "↩️ Отмена":
+        state.clear()
+        await update.message.reply_text("Отменено")
+        return
+
+
+# =========================
+# RUN
+# =========================
+
 app = Application.builder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
