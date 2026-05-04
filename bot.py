@@ -4,10 +4,13 @@ from aiohttp import web
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-TOKEN = "ВСТАВЬ_ТОКЕН"
+# 🔑 TOKEN
+TOKEN = os.getenv("TOKEN")
 
+# 🌐 PORT от Render
 PORT = int(os.environ.get("PORT", 10000))
 
+# 🤖 Bot + Application
 bot = Bot(token=TOKEN)
 app = Application.builder().token(TOKEN).build()
 
@@ -30,7 +33,7 @@ def save(data):
 data_store = load()
 
 
-# ---------------- BOT LOGIC ----------------
+# ---------------- COMMANDS ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -131,27 +134,25 @@ f"""📊 СТАТИСТИКА
 
 # ---------------- WEBHOOK HANDLER ----------------
 
-async def telegram_handler(request):
+async def webhook(request):
     data = await request.json()
-
     update = Update.de_json(data, bot)
-
     await app.process_update(update)
-
     return web.Response(text="ok")
 
 
-# ---------------- START WEB SERVER ----------------
+# ---------------- SET WEBHOOK ----------------
 
 async def on_startup(app_web):
     url = os.environ.get("RENDER_EXTERNAL_URL")
-
     if url:
         await bot.set_webhook(url + "/webhook")
 
 
+# ---------------- APP ----------------
+
 app_web = web.Application()
-app_web.router.add_post("/webhook", telegram_handler)
+app_web.router.add_post("/webhook", webhook)
 app_web.on_startup.append(on_startup)
 
 
