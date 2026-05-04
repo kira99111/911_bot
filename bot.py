@@ -1,162 +1,313 @@
-import os
-import json
-from aiohttp import web
-from telegram import Update, Bot
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from datetime import datetime
+import json
+import os
+import matplotlib.pyplot as plt
 
-# 🔑 TOKEN
-TOKEN = os.getenv("TOKEN")
+OKEN = os.getenv("TOKEN")
 
-# 🌐 PORT от Render
-PORT = int(os.environ.get("PORT", 10000))
-
-# 🤖 Bot + Application
-bot = Bot(token=TOKEN)
-app = Application.builder().token(TOKEN).build()
-
-DATA_FILE = "data.json"
+FILE = "journal.json"
+ARCHIVE = "archive.json"
 
 
 # ---------------- DATA ----------------
 
-def load():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
+def load(file):
+    if os.path.exists(file):
+        with open(file, "r") as f:
             return json.load(f)
-    return {}
+    return []
 
-def save(data):
-    with open(DATA_FILE, "w") as f:
+def save(file, data):
+    with open(file, "w") as f:
         json.dump(data, f, indent=2)
 
 
-data_store = load()
+weekly_log = load(FILE)
+archive_log = load(ARCHIVE)
 
 
-# ---------------- COMMANDS ----------------
+# ---------------- WEEK ----------------
+
+def current_week():
+    now = datetime.now()
+    week = (now.day - 1) // 7 + 1
+    return now.strftime(f"%Y %B W{week}")
+
+
+week_id = current_week()
+
+
+def check_week():
+    global weekly_log, archive_log, week_id
+
+    now = current_week()
+
+    if now != week_id:
+        archive_log.append({"week": week_id, "trades": weekly_log})
+        save(ARCHIVE, archive_log)
+
+        weekly_log = []
+        save(FILE, weekly_log)
+
+        week_id = now
+
+
+# ---------------- UI ----------------
+
+menu = ReplyKeyboardMarkup(
+    [
+        ["📊 Calc", "📅 Week"],
+        ["📌 Close trade", "📊 Stats"],
+        ["📈 Equity", "🧹 Reset"]
+    ],
+    resize_keyboard=True
+)
+
+
+# ---------------- START ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    check_week()
+
     await update.message.reply_text(
-        "🤖 Бот запущен\n\n"
-        "/deposit 100\n"
-        "/trade 2 3 BTCUSDT\n"
-        "/close 1 50\n"
-        "/stats"
+        f"""🤖 Trading Bot
+
+📅 {week_id}
+
+Выбери действие:""",
+        reply_markup=menu
     )
 
 
+# ---------------- HANDLE ----------------
+
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global data_store
+    global weekly_log
+
+    check_week()
+
+    text = update.message.text
+    step = context.user_data.get("step")
 
     try:
-        text = update.message.text
-        user_id = str(update.effective_user.id)
 
-        if user_id not in data_store:
-            data_store[user_id] = {"deposit": 0, "trades": []}
-
-        parts = text.split()
-
-        # 💰 deposit
-        if parts[0] == "/deposit":
-            data_store[user_id]["deposit"] = float(parts[1])
-            save(data_store)
-            await update.message.reply_text(f"💰 депозит: {parts[1]}$")
+        # 📊 CALC START
+        if text == "📊 Calc":
+            context.user_data["step"] = "deposit"
+            await update.message.reply_text("💰 депозит:")
             return
 
-        # 📊 trade
-        if parts[0] == "/trade":
-            risk = float(parts[1])
-            rr = float(parts[2])
-            ticker = parts[3]
+        # 📅 WEEK STATS
+        if text == "📅 Week":
+            closed = [t for t in weekly_log if t.get("end_deposit") is not None]
 
-            deposit = data_store[user_id]["deposit"]
+            if not weekly_log:
+                await update.message.reply_text("нет сделок")
+                return
 
-            trade = {
-                "id": len(data_store[user_id]["trades"]) + 1,
-                "risk": risk,
-                "rr": rr,
-                "ticker": ticker,
-                "deposit": deposit,
-                "pnl": None
-            }
+            wins = 0
+            losses = 0
+            pnl = 0
+            risk_sum = 0
 
-            data_store[user_id]["trades"].append(trade)
-            save(data_store)
+            for t in closed:
+                trade_pnl = t["end_deposit"] - t["start_deposit"]
+                pnl += trade_pnl
+                risk_sum += t["risk_amount"]
+
+                if trade_pnl > 0:
+                    wins += 1
+                else:
+                    losses += 1
+
+            total = len(closed)
+            winrate = (wins / total * 100) if total > 0 else 0
 
             await update.message.reply_text(
-f"""📊 СДЕЛКА #{trade['id']}
+f"""📊 НЕДЕЛЯ {week_id}
 
-💰 депозит: {deposit}$
-⚠️ риск: {risk}%
-📈 RR: {rr}
-📊 тикер: {ticker}
-"""
-            )
-            return
+📈 сделок: {len(weekly_log)}
+✅ закрытых: {total}
 
-        # ❌ close
-        if parts[0] == "/close":
-            trade_id = int(parts[1])
-            pnl = float(parts[2])
-
-            for t in data_store[user_id]["trades"]:
-                if t["id"] == trade_id:
-                    t["pnl"] = pnl
-                    data_store[user_id]["deposit"] += pnl
-                    break
-
-            save(data_store)
-            await update.message.reply_text("сделка закрыта")
-            return
-
-        # 📊 stats
-        if parts[0] == "/stats":
-            trades = data_store[user_id]["trades"]
-
-            wins = sum(1 for t in trades if (t.get("pnl") or 0) > 0)
-            losses = sum(1 for t in trades if (t.get("pnl") or 0) < 0)
-
-            await update.message.reply_text(
-f"""📊 СТАТИСТИКА
-
-📈 сделок: {len(trades)}
+🏆 winrate: {winrate:.1f}%
 🟢 wins: {wins}
 🔴 losses: {losses}
-💰 депозит: {data_store[user_id]['deposit']}$
+
+💰 риск: {risk_sum:.2f}$
+📊 PnL: {pnl:.2f}$
+
+🧠 {"🔥 сильная неделя" if winrate > 55 else "⚠️ слабая"}
 """
             )
+            return
+
+        # 📊 STATS
+        if text == "📊 Stats":
+            closed = [t for t in weekly_log if t.get("end_deposit") is not None]
+
+            if not closed:
+                await update.message.reply_text("нет данных")
+                return
+
+            wins = 0
+            losses = 0
+            profit = 0
+            loss = 0
+
+            equity = 0
+            peak = 0
+            drawdown = 0
+
+            for t in closed:
+                pnl = t["end_deposit"] - t["start_deposit"]
+
+                if pnl > 0:
+                    wins += 1
+                    profit += pnl
+                else:
+                    losses += 1
+                    loss += abs(pnl)
+
+                equity += pnl
+                peak = max(peak, equity)
+                drawdown = max(drawdown, peak - equity)
+
+            winrate = (wins / len(closed)) * 100
+            profit_factor = (profit / loss) if loss != 0 else float("inf")
+            expectancy = (profit - loss) / len(closed)
+
+            await update.message.reply_text(
+f"""📊 STATISTICS
+
+🏆 winrate: {winrate:.1f}%
+📈 profit factor: {profit_factor:.2f}
+📉 max drawdown: {drawdown:.2f}$
+
+💰 expectancy: {expectancy:.2f}$ / trade
+
+🟢 wins: {wins}
+🔴 losses: {losses}
+"""
+            )
+            return
+
+        # 📈 EQUITY
+        if text == "📈 Equity":
+            closed = [t for t in weekly_log if t.get("end_deposit") is not None]
+
+            if not closed:
+                await update.message.reply_text("нет данных")
+                return
+
+            x = []
+            y = []
+
+            for i, t in enumerate(closed):
+                x.append(i)
+                y.append(t["end_deposit"])
+
+            plt.figure()
+            plt.plot(x, y, marker="o")
+            plt.title(f"Equity - {week_id}")
+            plt.grid()
+
+            path = "equity.png"
+            plt.savefig(path)
+            plt.close()
+
+            await update.message.reply_photo(photo=open(path, "rb"))
+            return
+
+        # 🧹 RESET
+        if text == "🧹 Reset":
+            weekly_log = []
+            save(FILE, weekly_log)
+            await update.message.reply_text("очищено")
+            return
+
+        # 📌 CLOSE TRADE
+        if text == "📌 Close trade":
+            context.user_data["step"] = "close_id"
+            await update.message.reply_text("номер сделки:")
+            return
+
+        # 💰 DEPOSIT
+        if step == "deposit":
+            try:
+                context.user_data["deposit"] = float(text)
+                context.user_data["step"] = "risk"
+                await update.message.reply_text("риск %:")
+            except:
+                await update.message.reply_text("дубина")
+            return
+
+        # 📊 RISK → TRADE
+        if step == "risk":
+            try:
+                deposit = context.user_data["deposit"]
+                risk = float(text)
+
+                trade = {
+                    "id": len(weekly_log) + 1,
+                    "start_deposit": deposit,
+                    "risk_amount": deposit * risk / 100,
+                    "end_deposit": None
+                }
+
+                weekly_log.append(trade)
+                save(FILE, weekly_log)
+
+                context.user_data["step"] = None
+
+                await update.message.reply_text(f"сделка #{trade['id']} создана")
+
+            except:
+                await update.message.reply_text("дубина")
+
+            return
+
+        # 🔢 CLOSE ID
+        if step == "close_id":
+            try:
+                context.user_data["close_id"] = int(text)
+                context.user_data["step"] = "close_result"
+                await update.message.reply_text("PnL в $:")
+            except:
+                await update.message.reply_text("дубина")
+            return
+
+        # 🔢 CLOSE RESULT
+        if step == "close_result":
+            try:
+                trade_id = context.user_data["close_id"]
+                pnl = float(text)
+
+                for t in weekly_log:
+                    if t["id"] == trade_id:
+                        t["end_deposit"] = t["start_deposit"] + pnl
+                        break
+
+                save(FILE, weekly_log)
+                context.user_data["step"] = None
+
+                await update.message.reply_text("сделка закрыта")
+
+            except:
+                await update.message.reply_text("дубина")
+
             return
 
     except:
         await update.message.reply_text("дубина")
 
 
-# ---------------- WEBHOOK HANDLER ----------------
-
-async def webhook(request):
-    data = await request.json()
-    update = Update.de_json(data, bot)
-    await app.process_update(update)
-    return web.Response(text="ok")
-
-
-# ---------------- SET WEBHOOK ----------------
-
-async def on_startup(app_web):
-    url = os.environ.get("RENDER_EXTERNAL_URL")
-    if url:
-        await bot.set_webhook(url + "/webhook")
-
-
-# ---------------- APP ----------------
-
-app_web = web.Application()
-app_web.router.add_post("/webhook", webhook)
-app_web.on_startup.append(on_startup)
-
-
 # ---------------- RUN ----------------
 
-if __name__ == "__main__":
-    web.run_app(app_web, host="0.0.0.0", port=PORT)
+app = Application.builder().token(TOKEN).build()
+
+app.add_handler(CommandHandler("start", start))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+
+app.run_polling()
