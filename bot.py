@@ -5,7 +5,6 @@ from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
 TOKEN = os.getenv("TOKEN")
-
 FILE = "data.json"
 
 
@@ -15,15 +14,12 @@ FILE = "data.json"
 
 def load():
     if os.path.exists(FILE):
-        with open(FILE, "r") as f:
-            return json.load(f)
-
+        return json.load(open(FILE))
     return {
         "deposit": 0,
-        "trade_counter": 0,
-        "active_trade": None,
-        "week": [],
-        "month": []
+        "trades": [],
+        "counter": 0,
+        "active": None
     }
 
 
@@ -37,17 +33,14 @@ state = {}
 
 
 # =========================
-# KEYBOARD
+# MENU
 # =========================
 
-def get_menu():
-    buttons = [
-        ["💰 Депозит", "🧹 Очистить депозит"],
-        ["➕ Сделка", "📌 Закрыть сделку"],
-        ["📊 Неделя", "📅 Месяц"],
-        ["🧾 Очистить неделю", "🧾 Очистить месяц"]
-    ]
-    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+menu = ReplyKeyboardMarkup([
+    ["💰 Депозит"],
+    ["➕ Сделка", "📌 Закрыть"],
+    ["📊 Неделя", "📆 Месяц"]
+], resize_keyboard=True)
 
 
 # =========================
@@ -55,10 +48,7 @@ def get_menu():
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📊 ТРЕЙДИНГ БОТ",
-        reply_markup=get_menu()
-    )
+    await update.message.reply_text("📊 Trading Bot", reply_markup=menu)
 
 
 # =========================
@@ -82,83 +72,145 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state.clear()
         save(data)
 
-        await update.message.reply_text(f"💰 Депозит установлен: {data['deposit']}$")
+        await update.message.reply_text(f"💰 Депозит: {data['deposit']}$")
         return
 
 
     # =====================
-    # СОЗДАТЬ СДЕЛКУ
+    # СДЕЛКА
     # =====================
     if text == "➕ Сделка":
 
-        if data["active_trade"]:
+        if data["active"]:
             await update.message.reply_text("⚠️ Уже есть активная сделка")
             return
 
+        state["step"] = "risk"
+        await update.message.reply_text("Введите риск %:")
+        return
+
+
+    if state.get("step") == "risk":
+        state["risk"] = float(text)
+        state["step"] = "rr"
+        await update.message.reply_text("Введите RR:")
+        return
+
+
+    if state.get("step") == "rr":
+        state["rr"] = float(text)
         state["step"] = "pair"
         await update.message.reply_text("Введите тикер:")
         return
 
 
     if state.get("step") == "pair":
-        data["trade_counter"] += 1
+        state["pair"] = text
+        state["step"] = "entry"
+        await update.message.reply_text("ТВХ:")
+        return
+
+
+    if state.get("step") == "entry":
+        state["entry"] = float(text)
+        state["step"] = "stop"
+        await update.message.reply_text("Стоп:")
+        return
+
+
+    if state.get("step") == "stop":
+        state["stop"] = float(text)
+        state["step"] = "take"
+        await update.message.reply_text("Тейк:")
+        return
+
+
+    if state.get("step") == "take":
+
+        data["counter"] += 1
+
+        risk_amount = data["deposit"] * state["risk"] / 100
+
+        # расстояние риска
+        risk_distance = abs(state["entry"] - state["stop"])
+        reward_distance = abs(state["take"] - state["entry"])
+
+        position = min(data["deposit"] * 0.2, risk_amount * 10)
+
+        leverage = min(15, (position / risk_amount) if risk_amount else 1)
 
         trade = {
-            "id": data["trade_counter"],
-            "pair": text,
+            "id": data["counter"],
+            "pair": state["pair"],
+            "risk": state["risk"],
+            "rr": state["rr"],
+            "entry": state["entry"],
+            "stop": state["stop"],
+            "take": state["take"],
+            "risk_amount": risk_amount,
+            "position": position,
+            "leverage": leverage,
             "created": str(datetime.now()),
             "status": "open"
         }
 
-        data["active_trade"] = trade
-        state.clear()
+        data["active"] = trade
         save(data)
+        state.clear()
 
         await update.message.reply_text(
-            f"📌 Сделка #{trade['id']} ({trade['pair']}) в процессе"
+f"""📌 Trade #{trade['id']} ({trade['pair']})
+
+💰 риск: {risk_amount:.2f}$
+📊 позиция: {position:.2f}$
+⚡ плечо: x{leverage:.1f}
+
+📍 ТВХ: {trade['entry']}
+🛑 SL: {trade['stop']}
+🎯 TP: {trade['take']}
+
+📊 RR: {trade['rr']}"""
         )
         return
 
 
     # =====================
-    # ЗАКРЫТИЕ СДЕЛКИ
+    # ЗАКРЫТИЕ
     # =====================
-    if text == "📌 Закрыть сделку":
+    if text == "📌 Закрыть":
 
-        trade = data["active_trade"]
-
-        if not trade:
+        if not data["active"]:
             await update.message.reply_text("Нет активной сделки")
             return
 
         state["step"] = "close"
-        await update.message.reply_text("Введите результат сделки (+ или - $):")
+        await update.message.reply_text("Введите PnL (+/- $):")
         return
 
 
     if state.get("step") == "close":
-        trade = data["active_trade"]
 
-        result = float(text)
+        trade = data["active"]
+        pnl = float(text)
 
-        trade["result"] = result
-        trade["closed"] = str(datetime.now())
+        trade["pnl"] = pnl
         trade["status"] = "closed"
+        trade["closed"] = str(datetime.now())
 
-        # 💰 обновление депозита
-        data["deposit"] += result
+        # 💰 ОБНОВЛЕНИЕ ДЕПОЗИТА
+        data["deposit"] += pnl
 
-        # 📊 в архив
-        data["week"].append(trade)
-        data["month"].append(trade)
+        data["trades"].append(trade)
+        data["active"] = None
 
-        data["active_trade"] = None
-
-        state.clear()
         save(data)
+        state.clear()
 
         await update.message.reply_text(
-            f"📌 Сделка закрыта\n💰 PnL: {result}$\n💰 Новый депозит: {data['deposit']}$"
+f"""📌 Закрыто Trade #{trade['id']}
+
+💰 PnL: {pnl}$  
+💰 депозит: {data['deposit']}$"""
         )
         return
 
@@ -167,24 +219,23 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # НЕДЕЛЯ
     # =====================
     if text == "📊 Неделя":
-        trades = data["week"]
+
+        trades = data["trades"]
 
         if not trades:
             await update.message.reply_text("Нет сделок")
             return
 
-        wins = len([t for t in trades if t.get("result", 0) > 0])
-        losses = len([t for t in trades if t.get("result", 0) < 0])
+        wins = len([t for t in trades if t.get("pnl", 0) > 0])
+        losses = len([t for t in trades if t.get("pnl", 0) < 0])
 
-        total = len(trades)
-        pnl = sum(t.get("result", 0) for t in trades)
-
-        winrate = (wins / total) * 100 if total else 0
+        pnl = sum(t.get("pnl", 0) for t in trades)
+        winrate = (wins / len(trades)) * 100
 
         await update.message.reply_text(
 f"""📊 НЕДЕЛЯ
 
-📌 сделок: {total}
+📌 сделок: {len(trades)}
 🟢 +: {wins}
 🔴 -: {losses}
 
@@ -198,25 +249,24 @@ f"""📊 НЕДЕЛЯ
     # =====================
     # МЕСЯЦ
     # =====================
-    if text == "📅 Месяц":
-        trades = data["month"]
+    if text == "📆 Месяц":
+
+        trades = data["trades"]
 
         if not trades:
             await update.message.reply_text("Нет сделок")
             return
 
-        wins = len([t for t in trades if t.get("result", 0) > 0])
-        losses = len([t for t in trades if t.get("result", 0) < 0])
+        wins = len([t for t in trades if t.get("pnl", 0) > 0])
+        losses = len([t for t in trades if t.get("pnl", 0) < 0])
 
-        total = len(trades)
-        pnl = sum(t.get("result", 0) for t in trades)
-
-        winrate = (wins / total) * 100 if total else 0
+        pnl = sum(t.get("pnl", 0) for t in trades)
+        winrate = (wins / len(trades)) * 100
 
         await update.message.reply_text(
-f"""📅 МЕСЯЦ
+f"""📆 МЕСЯЦ
 
-📌 сделок: {total}
+📌 сделок: {len(trades)}
 🟢 +: {wins}
 🔴 -: {losses}
 
@@ -224,28 +274,6 @@ f"""📅 МЕСЯЦ
 💰 PnL: {pnl:.2f}$
 💰 депозит: {data['deposit']}$"""
         )
-        return
-
-
-    # =====================
-    # ОЧИСТКА
-    # =====================
-    if text == "🧹 Очистить депозит":
-        data["deposit"] = 0
-        save(data)
-        await update.message.reply_text("Депозит очищен")
-        return
-
-    if text == "🧾 Очистить неделю":
-        data["week"] = []
-        save(data)
-        await update.message.reply_text("Неделя очищена")
-        return
-
-    if text == "🧾 Очистить месяц":
-        data["month"] = []
-        save(data)
-        await update.message.reply_text("Месяц очищен")
         return
 
 
