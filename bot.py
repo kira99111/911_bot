@@ -3,8 +3,8 @@ from telegram.ext import Application, CommandHandler, MessageHandler, ContextTyp
 from datetime import datetime
 import json
 import os
+import matplotlib.pyplot as plt
 
-# 🔑 TOKEN теперь берётся из ENV (GitHub/Render safe)
 TOKEN = os.getenv("TOKEN")
 
 FILE = "journal.json"
@@ -18,12 +18,9 @@ def current_week():
 
 # 💾 файлы
 def load(file):
-    try:
-        if os.path.exists(file):
-            with open(file, "r") as f:
-                return json.load(f)
-    except:
-        pass
+    if os.path.exists(file):
+        with open(file, "r") as f:
+            return json.load(f)
     return []
 
 def save(file, data):
@@ -49,7 +46,7 @@ def check_week():
 
         week_id = now
 
-# 📱 кнопки (НЕ МЕНЯЛ)
+# 📱 кнопки (НОВАЯ STATS)
 menu = ReplyKeyboardMarkup(
     [
         ["📊 Calc", "📅 Week"],
@@ -73,7 +70,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=menu
     )
 
-# 🧠 обработчик (НЕ МЕНЯЛ ЛОГИКУ)
+# 🧠 обработчик
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global weekly_log
 
@@ -82,11 +79,13 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     step = context.user_data.get("step")
 
+    # 📊 calc
     if text == "📊 Calc":
         context.user_data["step"] = "deposit"
         await update.message.reply_text("💰 депозит:")
         return
 
+    # 📅 week + WINRATE
     if text == "📅 Week":
         closed = [t for t in weekly_log if t.get("end_deposit") is not None]
 
@@ -99,10 +98,14 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pnl = 0
         risk_sum = 0
 
+        equity = []
+
         for t in closed:
             trade_pnl = t["end_deposit"] - t["start_deposit"]
             pnl += trade_pnl
             risk_sum += t["risk_amount"]
+
+            equity.append(t["end_deposit"])
 
             if trade_pnl > 0:
                 wins += 1
@@ -130,6 +133,7 @@ f"""📊 НЕДЕЛЯ {week_id}
         )
         return
 
+    # 📊 STATS (НОВОЕ)
     if text == "📊 Stats":
         closed = [t for t in weekly_log if t.get("end_deposit") is not None]
 
@@ -153,39 +157,86 @@ f"""📊 НЕДЕЛЯ {week_id}
                 gross_loss += abs(pnl)
 
         winrate = (wins / len(closed)) * 100
+
         profit_factor = (gross_profit / gross_loss) if gross_loss != 0 else float("inf")
+
         expectancy = (gross_profit - gross_loss) / len(closed)
+
+        # 📉 drawdown
+        peak = 0
+        drawdown = 0
+        equity = 0
+
+        for t in closed:
+            equity += (t["end_deposit"] - t["start_deposit"])
+            peak = max(peak, equity)
+            drawdown = max(drawdown, peak - equity)
 
         await update.message.reply_text(
 f"""📊 STATISTICS
 
 🏆 winrate: {winrate:.1f}%
 📈 profit factor: {profit_factor:.2f}
-💰 expectancy: {expectancy:.2f}$
+📉 max drawdown: {drawdown:.2f}$
+
+💰 expectancy: {expectancy:.2f}$ / trade
 
 🟢 wins: {wins}
 🔴 losses: {losses}
+
+🧠 {"🔥 хорошая стратегия" if profit_factor > 1.5 else "⚠️ слабая стратегия"}
 """
         )
         return
 
+    # 📈 EQUITY GRAPH
+    if text == "📈 Equity":
+        closed = [t for t in weekly_log if t.get("end_deposit") is not None]
+
+        if not closed:
+            await update.message.reply_text("нет данных")
+            return
+
+        x = []
+        y = []
+
+        for i, t in enumerate(closed):
+            x.append(i)
+            y.append(t["end_deposit"])
+
+        plt.figure()
+        plt.plot(x, y, marker="o")
+        plt.title(f"Equity - {week_id}")
+        plt.grid()
+
+        path = "equity.png"
+        plt.savefig(path)
+        plt.close()
+
+        await update.message.reply_photo(photo=open(path, "rb"))
+        return
+
+    # 🧹 reset
     if text == "🧹 Reset":
         weekly_log = []
         save(FILE, weekly_log)
         await update.message.reply_text("очищено")
         return
 
+    # 📌 close trade
     if text == "📌 Close trade":
         context.user_data["step"] = "close_id"
         await update.message.reply_text("номер сделки:")
         return
 
+    # 💰 депозит
     if step == "deposit":
         context.user_data["deposit"] = float(text)
         context.user_data["step"] = "risk"
         await update.message.reply_text("риск %:")
         return
 
+    # 📊 риск → сделка
     if step == "risk":
         deposit = context.user_data["deposit"]
         risk = float(text)
@@ -205,6 +256,7 @@ f"""📊 STATISTICS
         await update.message.reply_text(f"сделка #{trade['id']} создана")
         return
 
+    # 🔢 close
     if step == "close_id":
         context.user_data["close_id"] = int(text)
         context.user_data["step"] = "close_result"
@@ -227,7 +279,7 @@ f"""📊 STATISTICS
         return
 
 
-# 🚀 запуск (Render safe)
+# 🚀 запуск
 app = Application.builder().token(TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
