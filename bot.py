@@ -1,249 +1,268 @@
-import os
-import json
-from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from datetime import datetime
+import json
+import os
 
 TOKEN = os.getenv("TOKEN")
-FILE = "bot_data.json"
 
+FILE = "data.json"
 
-# ======================
-# LOAD / SAVE
-# ======================
+# =======================
+# 💾 загрузка / сохранение
+# =======================
 
 def load():
     if os.path.exists(FILE):
-        return json.load(open(FILE))
+        with open(FILE, "r") as f:
+            return json.load(f)
     return {
         "deposit": 0,
         "trades": [],
-        "counter": 0,
-        "week_start": str(datetime.now().date())
+        "week_archive": [],
+        "month_archive": []
     }
-
 
 def save(data):
     with open(FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-
 data = load()
-state = {}
 
+# =======================
+# 📅 периоды
+# =======================
 
-# ======================
-# MENU
-# ======================
+def get_week():
+    now = datetime.now()
+    return f"{now.year}-W{now.isocalendar()[1]}"
 
-menu = ReplyKeyboardMarkup([
-    ["💰 Депозит"],
-    ["➕ Сделка", "📌 Закрыть"],
-    ["📊 Неделя", "📆 Месяц"],
-    ["🧹 Очистить неделю"]
-], resize_keyboard=True)
+def get_month():
+    now = datetime.now()
+    return f"{now.year}-{now.month}"
 
+# =======================
+# 📱 кнопки
+# =======================
 
-# ======================
-# START
-# ======================
+menu = ReplyKeyboardMarkup(
+    [
+        ["💰 Депозит"],
+        ["📊 Новая сделка"],
+        ["📌 Закрыть сделку"],
+        ["📅 Статистика недели", "📆 Статистика месяца"],
+        ["🧹 Очистить неделю"]
+    ],
+    resize_keyboard=True
+)
+
+# =======================
+# 🚀 старт
+# =======================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📊 Trading Bot", reply_markup=menu)
+    await update.message.reply_text(
+        "🤖 Трейдинг журнал\n\nВыбери действие:",
+        reply_markup=menu
+    )
 
-
-# ======================
-# RESET WEEK
-# ======================
-
-def reset_week_if_needed():
-    today = datetime.now().date()
-
-    if str(today) != data["week_start"]:
-        data["week_start"] = str(today)
-        data["trades"] = []
-        save(data)
-
-
-# ======================
-# HANDLER
-# ======================
+# =======================
+# 🧠 обработчик
+# =======================
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global data
+
     text = update.message.text
+    step = context.user_data.get("step")
 
-    reset_week_if_needed()
-
-
-    # ======================
-    # ДЕПОЗИТ
-    # ======================
+    # =======================
+    # 💰 депозит
+    # =======================
     if text == "💰 Депозит":
-        state["step"] = "deposit"
-        await update.message.reply_text("Введите депозит:")
+        context.user_data["step"] = "deposit"
+        await update.message.reply_text("💰 Введите депозит:")
         return
 
-    if state.get("step") == "deposit":
+    if step == "deposit":
         data["deposit"] = float(text)
         save(data)
-        state.clear()
-        await update.message.reply_text(f"💰 Депозит: {data['deposit']}$")
+        context.user_data["step"] = None
+
+        await update.message.reply_text(f"📊 Депозит установлен: {data['deposit']}$")
         return
 
-
-    # ======================
-    # СОЗДАНИЕ СДЕЛКИ
-    # ======================
-    if text == "➕ Сделка":
-        state["step"] = "risk"
-        await update.message.reply_text("Риск %:")
+    # =======================
+    # 📊 новая сделка
+    # =======================
+    if text == "📊 Новая сделка":
+        context.user_data["step"] = "risk"
+        await update.message.reply_text("⚠️ Введите риск (%):")
         return
 
-    if state.get("step") == "risk":
-        state["risk"] = float(text)
-        state["step"] = "ticker"
-        await update.message.reply_text("Тикер:")
+    if step == "risk":
+        context.user_data["risk"] = float(text)
+        context.user_data["step"] = "ticker"
+        await update.message.reply_text("📌 Введите тикер:")
         return
 
-    if state.get("step") == "ticker":
+    if step == "ticker":
+        context.user_data["ticker"] = text
+        context.user_data["step"] = "rr"
+        await update.message.reply_text("📈 Введите RR:")
+        return
 
-        data["counter"] += 1
+    if step == "rr":
+        risk = context.user_data["risk"]
+        ticker = context.user_data["ticker"]
+        rr = float(text)
+
+        trade_id = len(data["trades"]) + 1
+        deposit = data["deposit"]
+
+        risk_amount = deposit * risk / 100
+        profit = risk_amount * rr
 
         trade = {
-            "id": data["counter"],
-            "risk": state["risk"],
-            "ticker": text,
-            "status": "open",
-            "created": str(datetime.now())
+            "id": trade_id,
+            "ticker": ticker,
+            "risk": risk,
+            "rr": rr,
+            "risk_amount": risk_amount,
+            "profit": profit,
+            "result": None,
+            "created": datetime.now().isoformat()
         }
 
         data["trades"].append(trade)
         save(data)
 
-        state.clear()
+        context.user_data["step"] = None
 
         await update.message.reply_text(
-f"📌 Сделка #{trade['id']} открыта\n📊 {trade['ticker']}"
+f"""📊 ПАРАМЕТРЫ СДЕЛКИ #{trade_id}
+
+💰 Депозит: {deposit}$
+⚠️ Риск: {risk}% ({risk_amount:.2f}$)
+📈 RR: {rr}
+📌 Тикер: {ticker}
+
+🟢 Потенциал: +{profit:.2f}$
+🔴 Риск: -{risk_amount:.2f}$
+"""
         )
         return
 
+    # =======================
+    # 📌 закрытие сделки
+    # =======================
+    if text == "📌 Закрыть сделку":
+        open_trades = [t for t in data["trades"] if t["result"] is None]
 
-    # ======================
-    # ЗАКРЫТИЕ
-    # ======================
-    if text == "📌 Закрыть":
-        state["step"] = "close_id"
-        await update.message.reply_text("Номер сделки:")
+        if not open_trades:
+            await update.message.reply_text("❌ Нет открытых сделок")
+            return
+
+        msg = "📌 Выбери сделку:\n"
+        for t in open_trades:
+            msg += f"{t['id']}) {t['ticker']}\n"
+
+        context.user_data["step"] = "close_id"
+        await update.message.reply_text(msg)
         return
 
-    if state.get("step") == "close_id":
-        state["id"] = int(text)
-        state["step"] = "pnl"
-        await update.message.reply_text("PnL ($):")
+    if step == "close_id":
+        trade_id = int(text)
+        context.user_data["close_id"] = trade_id
+        context.user_data["step"] = "close_pnl"
+        await update.message.reply_text("💰 Введи PnL ($):")
         return
 
-    if state.get("step") == "pnl":
-
-        trade_id = state["id"]
+    if step == "close_pnl":
         pnl = float(text)
+        trade_id = context.user_data["close_id"]
 
         for t in data["trades"]:
-            if t["id"] == trade_id and t["status"] == "open":
-                t["status"] = "closed"
-                t["pnl"] = pnl
-                t["closed"] = str(datetime.now())
+            if t["id"] == trade_id:
+                t["result"] = pnl
+                data["deposit"] += pnl
                 break
 
         save(data)
-        state.clear()
-
-        await update.message.reply_text(f"📌 Сделка #{trade_id} закрыта\n💰 PnL: {pnl}$")
-        return
-
-
-    # ======================
-    # НЕДЕЛЯ
-    # ======================
-    if text == "📊 Неделя":
-
-        closed = [t for t in data["trades"] if t.get("status") == "closed"]
-
-        if not closed:
-            await update.message.reply_text("Нет данных")
-            return
-
-        wins = len([t for t in closed if t["pnl"] > 0])
-        losses = len([t for t in closed if t["pnl"] < 0])
-
-        winrate = (wins / len(closed)) * 100
-        pnl = sum(t["pnl"] for t in closed)
-
-        rr_list = []
-        for t in closed:
-            risk_amount = data["deposit"] * (t["risk"] / 100)
-            rr = t["pnl"] / risk_amount if risk_amount else 0
-            rr_list.append(rr)
-
-        avg_rr = sum(rr_list) / len(rr_list)
+        context.user_data["step"] = None
 
         await update.message.reply_text(
-f"""📊 НЕДЕЛЯ
+f"""📌 Сделка #{trade_id} закрыта
 
-📌 сделок: {len(closed)}
-🟢 win: {wins}
-🔴 loss: {losses}
-
-📈 winrate: {winrate:.1f}%
 💰 PnL: {pnl:.2f}$
-
-📊 Avg RR: {avg_rr:.2f}"""
+💰 Новый депозит: {data['deposit']:.2f}$
+"""
         )
         return
 
+    # =======================
+    # 📅 статистика недели
+    # =======================
+    if text == "📅 Статистика недели":
+        week = get_week()
 
-    # ======================
-    # МЕСЯЦ (упрощённо = все сделки)
-    # ======================
-    if text == "📆 Месяц":
+        trades = [t for t in data["trades"] if t["result"] is not None]
 
-        closed = [t for t in data["trades"] if t.get("status") == "closed"]
+        wins = len([t for t in trades if t["result"] > 0])
+        losses = len([t for t in trades if t["result"] <= 0])
 
-        if not closed:
-            await update.message.reply_text("Нет данных")
-            return
+        total = len(trades)
+        winrate = (wins / total * 100) if total else 0
 
-        wins = len([t for t in closed if t["pnl"] > 0])
-        losses = len([t for t in closed if t["pnl"] < 0])
-
-        winrate = (wins / len(closed)) * 100
-        pnl = sum(t["pnl"] for t in closed)
-
-        rr_list = []
-        for t in closed:
-            risk_amount = data["deposit"] * (t["risk"] / 100)
-            rr = t["pnl"] / risk_amount if risk_amount else 0
-            rr_list.append(rr)
-
-        avg_rr = sum(rr_list) / len(rr_list)
+        avg = sum(t["result"] for t in trades) / total if total else 0
 
         await update.message.reply_text(
-f"""📆 МЕСЯЦ
+f"""📅 НЕДЕЛЯ {week}
 
-📌 сделок: {len(closed)}
-🟢 win: {wins}
-🔴 loss: {losses}
+📊 Сделок: {total}
+🟢 Win: {wins}
+🔴 Loss: {losses}
 
-📈 winrate: {winrate:.1f}%
-💰 PnL: {pnl:.2f}$
-
-📊 Avg RR: {avg_rr:.2f}"""
+🏆 Winrate: {winrate:.1f}%
+💰 Средний результат: {avg:.2f}$
+💰 Депозит: {data['deposit']:.2f}$
+"""
         )
         return
 
+    # =======================
+    # 📆 статистика месяца
+    # =======================
+    if text == "📆 Статистика месяца":
+        month = get_month()
 
-    # ======================
-    # ОЧИСТКА НЕДЕЛИ
-    # ======================
+        trades = [t for t in data["trades"] if t["result"] is not None]
+
+        wins = len([t for t in trades if t["result"] > 0])
+        losses = len([t for t in trades if t["result"] <= 0])
+
+        total = len(trades)
+        winrate = (wins / total * 100) if total else 0
+
+        avg = sum(t["result"] for t in trades) / total if total else 0
+
+        await update.message.reply_text(
+f"""📆 МЕСЯЦ {month}
+
+📊 Сделок: {total}
+🟢 Win: {wins}
+🔴 Loss: {losses}
+
+🏆 Winrate: {winrate:.1f}%
+💰 Средний результат: {avg:.2f}$
+💰 Депозит: {data['deposit']:.2f}$
+"""
+        )
+        return
+
+    # =======================
+    # 🧹 очистка недели
+    # =======================
     if text == "🧹 Очистить неделю":
         data["trades"] = []
         save(data)
@@ -251,9 +270,9 @@ f"""📆 МЕСЯЦ
         return
 
 
-# ======================
-# RUN
-# ======================
+# =======================
+# 🚀 запуск
+# =======================
 
 app = Application.builder().token(TOKEN).build()
 
