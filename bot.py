@@ -1,39 +1,36 @@
 import os
 import json
-from datetime import datetime
-from fastapi import FastAPI, Request
-import uvicorn
+from aiohttp import web
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-TOKEN = os.getenv("TOKEN")
-URL = os.environ.get("RENDER_EXTERNAL_URL")  # Render даст домен
+TOKEN = "ВСТАВЬ_ТОКЕН"
 
-FILE = "journal.json"
+PORT = int(os.environ.get("PORT", 10000))
 
 bot = Bot(token=TOKEN)
-app = FastAPI()
+app = Application.builder().token(TOKEN).build()
 
-application = Application.builder().token(TOKEN).build()
+DATA_FILE = "data.json"
 
 
 # ---------------- DATA ----------------
 
 def load():
-    if os.path.exists(FILE):
-        with open(FILE, "r") as f:
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
             return json.load(f)
     return {}
 
 def save(data):
-    with open(FILE, "w") as f:
+    with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 
 data_store = load()
 
 
-# ---------------- LOGIC ----------------
+# ---------------- BOT LOGIC ----------------
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -100,9 +97,7 @@ f"""📊 СДЕЛКА #{trade['id']}
             trade_id = int(parts[1])
             pnl = float(parts[2])
 
-            trades = data_store[user_id]["trades"]
-
-            for t in trades:
+            for t in data_store[user_id]["trades"]:
                 if t["id"] == trade_id:
                     t["pnl"] = pnl
                     data_store[user_id]["deposit"] += pnl
@@ -134,28 +129,33 @@ f"""📊 СТАТИСТИКА
         await update.message.reply_text("дубина")
 
 
-# ---------------- WEBHOOK ----------------
+# ---------------- WEBHOOK HANDLER ----------------
 
-@app.post("/")
-async def webhook(req: Request):
-    data = await req.json()
+async def telegram_handler(request):
+    data = await request.json()
+
     update = Update.de_json(data, bot)
-    await application.process_update(update)
-    return {"ok": True}
+
+    await app.process_update(update)
+
+    return web.Response(text="ok")
 
 
-@app.on_event("startup")
-async def on_start():
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
+# ---------------- START WEB SERVER ----------------
 
-    # webhook установка
-    if URL:
-        await bot.set_webhook(f"{URL}/")
+async def on_startup(app_web):
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+
+    if url:
+        await bot.set_webhook(url + "/webhook")
+
+
+app_web = web.Application()
+app_web.router.add_post("/webhook", telegram_handler)
+app_web.on_startup.append(on_startup)
 
 
 # ---------------- RUN ----------------
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    web.run_app(app_web, host="0.0.0.0", port=PORT)
