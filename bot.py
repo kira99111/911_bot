@@ -5,7 +5,7 @@ import json
 import os
 import matplotlib.pyplot as plt
 
-OKEN = os.getenv("TOKEN")
+TOKEN = os.getenv("TOKEN")
 
 FILE = "journal.json"
 ARCHIVE = "archive.json"
