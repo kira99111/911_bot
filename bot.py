@@ -13,31 +13,29 @@ FILE = "journal.json"
 ARCHIVE = "archive.json"
 
 
-# 📅 неделя
 def current_week():
     now = datetime.now()
     week = (now.day - 1) // 7 + 1
     return now.strftime(f"%Y %B W{week}")
 
 
-# 💾 файлы
 def load(file):
     if os.path.exists(file):
         with open(file, "r") as f:
             return json.load(f)
     return {}
 
+
 def save(file, data):
     with open(file, "w") as f:
         json.dump(data, f, indent=2)
 
 
-weekly_log = load(FILE)       # теперь dict: user_id -> trades
-archive_log = load(ARCHIVE)   # dict
+weekly_log = load(FILE)
+archive_log = load(ARCHIVE)
 week_id = current_week()
 
 
-# 🔄 неделя
 def check_week():
     global weekly_log, archive_log, week_id
 
@@ -53,7 +51,6 @@ def check_week():
         week_id = now
 
 
-# 🟢 START
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     check_week()
 
@@ -62,7 +59,6 @@ f"""🤖 TRADING BOT
 
 📅 Неделя: {week_id}
 
-Команды:
 /deposit 100 — депозит
 /trade 2 3 BTCUSDT — сделка
 /close 1 50 — закрыть
@@ -74,34 +70,29 @@ f"""🤖 TRADING BOT
     )
 
 
-# 🧠 HANDLER
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global weekly_log
 
-    check_week()
+    try:
+        check_week()
 
-    text = update.message.text
-    parts = text.split()
-    user_id = str(update.effective_user.id)
+        text = update.message.text
+        parts = text.split()
+        user_id = str(update.effective_user.id)
 
-    # 📦 создаём пользователя
-    if user_id not in weekly_log:
-        weekly_log[user_id] = []
+        if user_id not in weekly_log:
+            weekly_log[user_id] = []
 
-    user_trades = weekly_log[user_id]
+        user_trades = weekly_log[user_id]
 
-    # 💰 депозит
-    if parts[0] == "/deposit":
-        try:
+        # 💰 депозит
+        if parts[0] == "/deposit":
             context.user_data["deposit"] = float(parts[1])
             await update.message.reply_text(f"💰 депозит: {parts[1]}$")
-        except:
-            await update.message.reply_text("пример: /deposit 100")
-        return
+            return
 
-    # 📊 trade
-    if parts[0] == "/trade":
-        try:
+        # 📊 trade
+        if parts[0] == "/trade":
             risk = float(parts[1])
             rr = float(parts[2])
             ticker = parts[3]
@@ -130,14 +121,10 @@ f"""📊 СДЕЛКА #{trade['id']}
 📊 тикер: {ticker}
 """
             )
+            return
 
-        except:
-            await update.message.reply_text("пример: /trade 2 3 BTCUSDT")
-        return
-
-    # 📌 close
-    if parts[0] == "/close":
-        try:
+        # 📌 close
+        if parts[0] == "/close":
             trade_id = int(parts[1])
             pnl = float(parts[2])
 
@@ -150,95 +137,97 @@ f"""📊 СДЕЛКА #{trade['id']}
             save(FILE, weekly_log)
 
             await update.message.reply_text("сделка закрыта")
+            return
 
-        except:
-            await update.message.reply_text("пример: /close 1 50")
-        return
+        # 📅 week
+        if parts[0] == "/week":
+            closed = [t for t in user_trades if t.get("end_deposit")]
 
-    # 📅 week
-    if parts[0] == "/week":
-        closed = [t for t in user_trades if t.get("end_deposit")]
+            wins = sum(1 for t in closed if t["end_deposit"] > t["start_deposit"])
+            losses = len(closed) - wins
 
-        wins = sum(1 for t in closed if t["end_deposit"] > t["start_deposit"])
-        losses = len(closed) - wins
+            winrate = (wins / len(closed) * 100) if closed else 0
 
-        winrate = (wins / len(closed) * 100) if closed else 0
-
-        await update.message.reply_text(
+            await update.message.reply_text(
 f"""📊 НЕДЕЛЯ
 
 📈 сделок: {len(user_trades)}
 🏆 winrate: {winrate:.1f}%
+🟢 wins: {wins}
+🔴 losses: {losses}
 """
-        )
-        return
+            )
+            return
 
-    # 📊 stats
-    if parts[0] == "/stats":
-        closed = [t for t in user_trades if t.get("end_deposit")]
+        # 📊 stats
+        if parts[0] == "/stats":
+            closed = [t for t in user_trades if t.get("end_deposit")]
 
-        wins = sum(1 for t in closed if t["end_deposit"] > t["start_deposit"])
-        losses = len(closed) - wins
+            wins = sum(1 for t in closed if t["end_deposit"] > t["start_deposit"])
+            losses = len(closed) - wins
 
-        await update.message.reply_text(
+            await update.message.reply_text(
 f"""📊 STATS
 
 🟢 wins: {wins}
 🔴 losses: {losses}
 """
-        )
-        return
-
-    # 📈 equity
-    if parts[0] == "/equity":
-        closed = [t for t in user_trades if t.get("end_deposit")]
-
-        if not closed:
-            await update.message.reply_text("нет данных")
+            )
             return
 
-        x, y = [], []
+        # 📈 equity
+        if parts[0] == "/equity":
+            closed = [t for t in user_trades if t.get("end_deposit")]
 
-        for i, t in enumerate(closed):
-            x.append(i)
-            y.append(t["end_deposit"])
+            if not closed:
+                await update.message.reply_text("нет данных")
+                return
 
-        plt.figure()
-        plt.plot(x, y)
-        plt.title("Equity")
+            x, y = [], []
 
-        path = "equity.png"
-        plt.savefig(path)
-        plt.close()
+            for i, t in enumerate(closed):
+                x.append(i)
+                y.append(t["end_deposit"])
 
-        await update.message.reply_photo(photo=open(path, "rb"))
-        return
+            plt.figure()
+            plt.plot(x, y)
 
-    # 🧹 reset
-    if parts[0] == "/reset":
-        weekly_log[user_id] = []
-        save(FILE, weekly_log)
-        await update.message.reply_text("очищено")
-        return
+            path = "equity.png"
+            plt.savefig(path)
+            plt.close()
+
+            await update.message.reply_photo(photo=open(path, "rb"))
+            return
+
+        # 🧹 reset
+        if parts[0] == "/reset":
+            weekly_log[user_id] = []
+            save(FILE, weekly_log)
+            await update.message.reply_text("очищено")
+            return
+
+    except:
+        await update.message.reply_text("дубина")
 
 
-# 🌐 render port
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"bot running")
 
+
 def run_server():
     port = int(os.environ.get("PORT", 10000))
     server = HTTPServer(("0.0.0.0", port), Handler)
     server.serve_forever()
 
+
 threading.Thread(target=run_server).start()
 
 
-# 🚀 bot
 app = Application.builder().token(TOKEN).build()
+
 app.add_handler(CommandHandler("start", start))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
 
